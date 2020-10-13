@@ -1,12 +1,15 @@
 package main
 
 import (
-  "context"
-  "encoding/json"
-  "github.com/grafana/grafana-plugin-sdk-go/backend"
-  "github.com/grafana/grafana-plugin-sdk-go/backend/datasource"
-  "github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
-  "net/http"
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/datasource"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+	"github.com/kpfaulkner/azurecosts/pkg"
+	"net/http"
 )
 
 type AzureCostsQuery struct {
@@ -21,7 +24,10 @@ type AzureCostsQuery struct {
 }
 
 type AzureCostsPluginConfig struct {
-	AzureCostsAPIKey string `json:"azurecostsApiKey"`
+	ClientID       string `json:"clientID"`
+	ClientSecret   string `json:"clientSecret"`
+	TenantID       string `json:"tenantID"`
+	SubscriptionID string `json:"SubscriptionID"`
 }
 
 // newAzureCostsDataSource returns datasource.ServeOpts.
@@ -33,6 +39,7 @@ func newAzureCostsDataSource() datasource.ServeOpts {
 
 	ds := &AzureCostsDataSource{
 		im: im,
+		//azureCosts: pkg.NewAzureCost("","","",""),
 	}
 
 	return datasource.ServeOpts{
@@ -48,8 +55,9 @@ type AzureCostsDataSource struct {
 	// but a best practice that we recommend that you follow.
 	im instancemgmt.InstanceManager
 
-	//azure string
-	//host           string
+	config AzureCostsPluginConfig
+
+	azureCosts *pkg.AzureCost
 }
 
 // QueryData handles multiple queries and returns multiple responses.
@@ -64,6 +72,12 @@ func (td *AzureCostsDataSource) QueryData(ctx context.Context, req *backend.Quer
 		return nil, err
 	}
 
+	td.config = config
+
+	if td.azureCosts == nil {
+		ac := pkg.NewAzureCost(td.config.SubscriptionID, td.config.TenantID, td.config.ClientID, td.config.ClientSecret)
+		td.azureCosts = &ac
+	}
 
 	// create response struct
 	response := backend.NewQueryDataResponse()
@@ -87,17 +101,13 @@ type queryModel struct {
 	Format string `json:"format"`
 }
 
-
 func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQuery) (*backend.DataResponse, error) {
-
-
-  /*
-  // Unmarshal the json into our queryModel
+	// Unmarshal the json into our queryModel
 	var qm queryModel
 
-
+	var acQuery AzureCostsQuery
 	queryBytes, _ := query.JSON.MarshalJSON()
-	err := json.Unmarshal(queryBytes, &sgQuery)
+	err := json.Unmarshal(queryBytes, &acQuery)
 	if err != nil {
 		// empty response? or real error? figure out later.
 		return nil, err
@@ -114,12 +124,21 @@ func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQue
 		log.DefaultLogger.Warn("format is empty. defaulting to time series")
 	}
 
+	sc, err := td.azureCosts.GenerateSubscriptionCostDetails([]string{td.config.SubscriptionID}, query.TimeRange.From, query.TimeRange.To)
+	if err != nil {
+		log.DefaultLogger.Error(fmt.Sprintf("ERROR getting costs %s", err.Error()))
+		return nil, err
+	}
 
-	// add the frames to the response
-	response.Frames = append(response.Frames, frame)
-	return &response, nil */
+	log.DefaultLogger.Info(fmt.Sprintf("azure costs res %v", sc))
 
-  return nil, nil
+	/*
+
+	  // add the frames to the response
+	  response.Frames = append(response.Frames, frame)
+	  return &response, nil */
+
+	return nil, nil
 }
 
 // CheckHealth handles health checks sent from Grafana to the plugin.
@@ -128,17 +147,18 @@ func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQue
 // a datasource is working as expected.
 func (td *AzureCostsDataSource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
 
-  var status = backend.HealthStatusOk
-  var message = "Data source is working"
+	var status = backend.HealthStatusOk
+	var message = "Data source is working"
 
-  configBytes, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
-  var config AzureCostsPluginConfig
-  err := json.Unmarshal(configBytes, &config)
-  if err != nil {
-    status = backend.HealthStatusError
-    message = "Unable to contact Azure"
-  }
+	configBytes, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
+	var config AzureCostsPluginConfig
+	err := json.Unmarshal(configBytes, &config)
+	if err != nil {
+		status = backend.HealthStatusError
+		message = "Unable to contact Azure"
+	}
 
+	td.config = config
 
 	return &backend.CheckHealthResult{
 		Status:  status,
