@@ -55,13 +55,13 @@ func convertDailyBillingDetailsToDailyCacheEntry(dbd pkg.DailyBillingDetails) Da
 	dce.Amount = dbd.Properties.PretaxCost
 
 	/*
-	dce.StartDate = time.Date(dbd.Properties.UsageStart.Year(), dbd.Properties.UsageStart.Month(),
-    dbd.Properties.UsageStart.Day(),0,0, 0, 0, dbd.Properties.UsageStart.Location()).UTC()
-	dce.EndDate = time.Date(dbd.Properties.UsageEnd.Year(), dbd.Properties.UsageEnd.Month(),
-    dbd.Properties.UsageEnd.Day(),0,0, 0, 0, dbd.Properties.UsageEnd.Location()).UTC()
+		dce.StartDate = time.Date(dbd.Properties.UsageStart.Year(), dbd.Properties.UsageStart.Month(),
+	    dbd.Properties.UsageStart.Day(),0,0, 0, 0, dbd.Properties.UsageStart.Location()).UTC()
+		dce.EndDate = time.Date(dbd.Properties.UsageEnd.Year(), dbd.Properties.UsageEnd.Month(),
+	    dbd.Properties.UsageEnd.Day(),0,0, 0, 0, dbd.Properties.UsageEnd.Location()).UTC()
 	*/
 	dce.StartDate = dbd.Properties.UsageStart
-  dce.EndDate = dbd.Properties.UsageEnd
+	dce.EndDate = dbd.Properties.UsageEnd
 
 	return dce
 }

@@ -1,19 +1,27 @@
 
 import defaults from 'lodash/defaults';
 import React, { ChangeEvent, PureComponent } from 'react';
-import { LegacyForms } from '@grafana/ui';
-import { QueryEditorProps } from '@grafana/data';
+import {LegacyForms} from '@grafana/ui';
+
+import {QueryEditorProps} from '@grafana/data';
 import { DataSource } from './DataSource';
 import {defaultQuery,  MyDataSourceOptions, MyQuery } from './types';
 
-const { FormField } = LegacyForms;
+
+const {  FormField } = LegacyForms;
 
 type Props = QueryEditorProps<DataSource, MyQuery, MyDataSourceOptions>;
+
 
 export class QueryEditor extends PureComponent<Props> {
   onQueryTextChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query } = this.props;
     onChange({ ...query, queryText: event.target.value });
+  };
+
+  onRGTextChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, rgText: event.target.value });
   };
 
   onConstantChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -26,6 +34,7 @@ export class QueryEditor extends PureComponent<Props> {
   render() {
     const query = defaults(this.props.query, defaultQuery);
     const { queryText } = query;
+    const { rgText } = query;
     return (
       <div className="gf-form">
         <FormField
@@ -36,6 +45,15 @@ export class QueryEditor extends PureComponent<Props> {
           tooltip="Subscription ID"
           inputWidth={100}
         />
+        <FormField
+          labelWidth={8}
+          value={rgText || ''}
+          onChange={this.onRGTextChange}
+          label="Split on RG : Y/N"
+          tooltip="Split on Resource Groups"
+          inputWidth={100}
+        />
+
       </div>
     );
   }

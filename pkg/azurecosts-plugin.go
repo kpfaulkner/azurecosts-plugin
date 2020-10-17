@@ -1,18 +1,18 @@
 package main
 
 import (
-  "context"
-  "encoding/json"
-  "fmt"
-  "github.com/grafana/grafana-plugin-sdk-go/backend"
-  "github.com/grafana/grafana-plugin-sdk-go/backend/datasource"
-  "github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
-  "github.com/grafana/grafana-plugin-sdk-go/backend/log"
-  "github.com/grafana/grafana-plugin-sdk-go/data"
-  "github.com/kpfaulkner/azurecosts/pkg"
-  "net/http"
-  "strings"
-  "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/datasource"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+	"github.com/grafana/grafana-plugin-sdk-go/data"
+	"github.com/kpfaulkner/azurecosts/pkg"
+	"net/http"
+	"strings"
+	"time"
 )
 
 type AzureCostsQuery struct {
@@ -23,6 +23,7 @@ type AzureCostsQuery struct {
 	MaxDataPoints int     `json:"maxDataPoints"`
 	OrgID         int     `json:"orgId"`
 	QueryText     string  `json:"queryText"`
+	RGSplit       string  `json:"rgText"`
 	RefID         string  `json:"refId"`
 }
 
@@ -31,6 +32,10 @@ type AzureCostsPluginConfig struct {
 	ClientSecret   string `json:"clientSecret"`
 	TenantID       string `json:"tenantID"`
 	SubscriptionID string `json:"SubscriptionID"`
+}
+
+type queryModel struct {
+  Format string `json:"format"`
 }
 
 // newAzureCostsDataSource returns datasource.ServeOpts.
@@ -60,7 +65,6 @@ type AzureCostsDataSource struct {
 	im instancemgmt.InstanceManager
 
 	config AzureCostsPluginConfig
-
 	azureCosts *pkg.AzureCost
 
 	// cache at subscription level.
@@ -91,7 +95,7 @@ func (td *AzureCostsDataSource) QueryData(ctx context.Context, req *backend.Quer
 
 	// loop over queries and execute them individually.
 	for _, q := range req.Queries {
-		res, err := td.query(ctx, q)
+		res, err := td.query(q)
 		if err != nil {
 			return nil, err
 		}
@@ -102,10 +106,6 @@ func (td *AzureCostsDataSource) QueryData(ctx context.Context, req *backend.Quer
 	}
 
 	return response, nil
-}
-
-type queryModel struct {
-	Format string `json:"format"`
 }
 
 // executes query AND populates cache.
@@ -123,14 +123,14 @@ func (td *AzureCostsDataSource) executeQueryAndPopulateCache(subscriptionID stri
 	log.DefaultLogger.Info(fmt.Sprintf("Got data, len %d", len(dailyBilling)))
 	cacheEntry := NewSubscriptionCacheEntry()
 	cacheEntry.SubscriptionID = subscriptionID
-  cacheEntry.StartDate = startTime
+	cacheEntry.StartDate = startTime
 	cacheEntry.EndDate = endTime
 
-  log.DefaultLogger.Info(fmt.Sprintf("first date result entry %s", dailyBilling[0].Properties.UsageStart))
+	log.DefaultLogger.Info(fmt.Sprintf("first date result entry %s", dailyBilling[0].Properties.UsageStart))
 
 	//return nil, errors.New("FAKE ERROR")
 
-  for _, db := range dailyBilling {
+	for _, db := range dailyBilling {
 		ce := convertDailyBillingDetailsToDailyCacheEntry(db)
 
 		// resource group
@@ -150,12 +150,8 @@ func (td *AzureCostsDataSource) executeQueryAndPopulateCache(subscriptionID stri
 		if ok {
 			ce.Amount += existingEntryForDate.Amount
 		}
-		/*
-    roundedStartTime2 := time.Date(startTime.Year(), startTime.Month(),
-      startTime.Day(), 0,0, 0, 0, time.UTC)
-    ce.StartDate = roundedStartTime2.UTC() */
 
-    log.DefaultLogger.Info(fmt.Sprintf("Adding cache with key  %s", ce.StartDate))
+		log.DefaultLogger.Info(fmt.Sprintf("Adding cache with key  %s", ce.StartDate))
 		dailyCacheEntryCollection[ce.StartDate] = ce
 		cacheEntry.ResourceGroupCosts[rg] = dailyCacheEntryCollection
 	}
@@ -166,7 +162,101 @@ func (td *AzureCostsDataSource) executeQueryAndPopulateCache(subscriptionID stri
 	return cacheEntry, nil
 }
 
-func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQuery) (*backend.DataResponse, error) {
+func (td *AzureCostsDataSource) generateRGSplitFrame(roundedStartTime time.Time, cacheEntry *SubscriptionCacheEntry) (*data.Frame, error) {
+
+  // create data frame response
+  frame := data.NewFrame("response")
+
+  // only set time once? I hope :)
+  times := []time.Time{}
+
+  currentTime := roundedStartTime
+
+  // Generate times array
+  for currentTime.Before(cacheEntry.EndDate) {
+    times = append(times, currentTime)
+    currentTime = currentTime.Add(24 * time.Hour)
+  }
+
+  log.DefaultLogger.Info(fmt.Sprintf("time count %d", len(times)))
+
+  for rg, costs := range cacheEntry.ResourceGroupCosts {
+    log.DefaultLogger.Info(fmt.Sprintf("roundedStartTime 3 %s ", roundedStartTime))
+    log.DefaultLogger.Info(fmt.Sprintf("rg %s : costs size %d", rg, len(costs)))
+    for _, c := range costs {
+      log.DefaultLogger.Info(fmt.Sprintf("rg %s : cost key %s", rg, c.StartDate))
+    }
+
+    //log.DefaultLogger.Info(fmt.Sprintf("rg %s : costs data %v", rg, costs))
+    amounts := []float64{}
+
+    // loop through time, so we can provide empty entries
+    // when we dont have data for that RG
+    currentTime = roundedStartTime
+    for currentTime.Before(cacheEntry.EndDate) {
+      log.DefaultLogger.Info(fmt.Sprintf("RG %s ct %s", rg, currentTime))
+      e, ok := costs[currentTime]
+      if ok {
+        amounts = append(amounts, e.Amount)
+      } else {
+        amounts = append(amounts, 0)
+      }
+
+      currentTime = currentTime.Add(24 * time.Hour)
+    }
+
+    frame.Fields = append(frame.Fields,
+      data.NewField(rg, nil, amounts),
+    )
+  }
+
+  frame.Fields = append(frame.Fields,
+    data.NewField("time", nil, times),
+  )
+
+  return frame, nil
+}
+
+func (td *AzureCostsDataSource) generateSubscriptionFrame(roundedStartTime time.Time, cacheEntry *SubscriptionCacheEntry) (*data.Frame, error) {
+
+
+  timeCosts := make(map[time.Time]float64)
+  for _, costs := range cacheEntry.ResourceGroupCosts {
+    for _,c := range costs {
+      existing := timeCosts[c.StartDate]
+      existing += c.Amount
+      timeCosts[c.StartDate] = existing
+    }
+  }
+
+  // only set time once? I hope :)
+  times := []time.Time{}
+  amounts := []float64{}
+
+  // have all costs added up in timeCosts, now to map out to particular dates
+  currentTime := roundedStartTime
+
+  // Generate times array
+  for currentTime.Before(cacheEntry.EndDate) {
+    times = append(times, currentTime)
+    cost:= timeCosts[currentTime]
+    amounts = append(amounts, cost)
+    currentTime = currentTime.Add(24 * time.Hour)
+  }
+
+  // create data frame response
+  frame := data.NewFrame("response")
+  frame.Fields = append(frame.Fields,
+    data.NewField("time", nil, times),
+  )
+
+  frame.Fields = append(frame.Fields,
+    data.NewField("subscription", nil, amounts),
+  )
+  return frame, nil
+}
+
+func (td *AzureCostsDataSource) query(query backend.DataQuery) (*backend.DataResponse, error) {
 	// Unmarshal the json into our queryModel
 	var qm queryModel
 
@@ -191,21 +281,13 @@ func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQue
 		log.DefaultLogger.Warn("format is empty. defaulting to time series")
 	}
 
+	roundedStartTime := time.Date(query.TimeRange.From.Year(), query.TimeRange.From.Month(),
+		query.TimeRange.From.Day(), 0, 0, 0, 0, time.UTC).UTC()
 
-  roundedStartTime := time.Date(query.TimeRange.From.Year(), query.TimeRange.From.Month(),
-    query.TimeRange.From.Day(),0,0, 0, 0, time.UTC).UTC()
-
-  roundedEndTime := time.Date(query.TimeRange.To.Year(), query.TimeRange.To.Month(),
-    query.TimeRange.To.Day(),0,0, 0, 0, time.UTC).UTC()
-
-  /*
-	roundedStartTime := query.TimeRange.From
-	roundedEndTime := query.TimeRange.To */
-
-  log.DefaultLogger.Info(fmt.Sprintf("roundedStartTime 1 %s ", roundedStartTime))
+	roundedEndTime := time.Date(query.TimeRange.To.Year(), query.TimeRange.To.Month(),
+		query.TimeRange.To.Day(), 0, 0, 0, 0, time.UTC).UTC()
 
 	subscriptionID := acQuery.QueryText
-
 	var cacheEntry *SubscriptionCacheEntry
 
 	// check if we already have this in cache.
@@ -223,62 +305,26 @@ func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQue
 		log.DefaultLogger.Info("got data in cache")
 	}
 
-  log.DefaultLogger.Info(fmt.Sprintf("roundedStartTime 2 %s ", roundedStartTime))
-	//log.DefaultLogger.Info(fmt.Sprintf("azure costs res %v", cacheEntry))
+	// determine type of output (RG, total number, other etc).
+  splitOnRG := acQuery.RGSplit=="Y"
 
-	// create data frame response
-	frame := data.NewFrame("response")
-
-	// only set time once? I hope :)
-	times := []time.Time{}
-
-  currentTime := roundedStartTime
-
-	// Generate times array
-	for currentTime.Before(cacheEntry.EndDate) {
-		times = append(times, currentTime)
-		currentTime = currentTime.Add(24 * time.Hour)
-	}
-
-	log.DefaultLogger.Info(fmt.Sprintf("time count %d", len(times)))
-
-	for rg, costs := range cacheEntry.ResourceGroupCosts {
-    log.DefaultLogger.Info(fmt.Sprintf("roundedStartTime 3 %s ", roundedStartTime))
-		log.DefaultLogger.Info(fmt.Sprintf("rg %s : costs size %d", rg, len(costs)))
-		for _,c := range costs {
-      log.DefaultLogger.Info(fmt.Sprintf("rg %s : cost key %s", rg, c.StartDate))
+  var frame *data.Frame
+  if splitOnRG {
+    frame, err = td.generateRGSplitFrame(roundedStartTime, cacheEntry)
+    if err != nil {
+      log.DefaultLogger.Error(fmt.Sprintf("error generating split frame %s ", err.Error))
+      return nil, err
     }
-
-    //log.DefaultLogger.Info(fmt.Sprintf("rg %s : costs data %v", rg, costs))
-		amounts := []float64{}
-
-		// loop through time, so we can provide empty entries
-		// when we dont have data for that RG
-		currentTime = roundedStartTime
-		for currentTime.Before(cacheEntry.EndDate) {
-      log.DefaultLogger.Info(fmt.Sprintf("RG %s ct %s", rg, currentTime))
-			e, ok := costs[currentTime]
-			if ok {
-				amounts = append(amounts, e.Amount)
-			} else {
-				amounts = append(amounts, 0)
-			}
-			currentTime = currentTime.Add(24 * time.Hour)
-		}
-
-		log.DefaultLogger.Info(fmt.Sprintf("XXXXXXXXX RG %s val %v", rg, amounts))
-		frame.Fields = append(frame.Fields,
-			data.NewField(rg, nil, amounts),
-		)
-	}
-
-	frame.Fields = append(frame.Fields,
-		data.NewField("time", nil, times),
-	)
+  } else {
+    frame, err = td.generateSubscriptionFrame(roundedStartTime, cacheEntry)
+    if err != nil {
+      log.DefaultLogger.Error(fmt.Sprintf("error generating subscription frame %s ", err.Error))
+      return nil, err
+    }
+  }
 
 	// add the frames to the response
 	response.Frames = append(response.Frames, frame)
-
 	return &response, nil
 }
 
