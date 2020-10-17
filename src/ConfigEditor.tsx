@@ -97,7 +97,7 @@ export class ConfigEditor extends PureComponent<Props, State> {
         </div>
         <div className="gf-form">
           <FormField
-            label="SubscriptionID"
+            label="Default SubscriptionID"
             labelWidth={6}
             inputWidth={20}
             onChange={this.onSubscriptionIDChangeChange}

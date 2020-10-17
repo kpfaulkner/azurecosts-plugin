@@ -1,15 +1,18 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"github.com/grafana/grafana-plugin-sdk-go/backend"
-	"github.com/grafana/grafana-plugin-sdk-go/backend/datasource"
-	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
-	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
-	"github.com/kpfaulkner/azurecosts/pkg"
-	"net/http"
+  "context"
+  "encoding/json"
+  "fmt"
+  "github.com/grafana/grafana-plugin-sdk-go/backend"
+  "github.com/grafana/grafana-plugin-sdk-go/backend/datasource"
+  "github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
+  "github.com/grafana/grafana-plugin-sdk-go/backend/log"
+  "github.com/grafana/grafana-plugin-sdk-go/data"
+  "github.com/kpfaulkner/azurecosts/pkg"
+  "net/http"
+  "strings"
+  "time"
 )
 
 type AzureCostsQuery struct {
@@ -40,6 +43,7 @@ func newAzureCostsDataSource() datasource.ServeOpts {
 	ds := &AzureCostsDataSource{
 		im: im,
 		//azureCosts: pkg.NewAzureCost("","","",""),
+		cache: NewCache(),
 	}
 
 	return datasource.ServeOpts{
@@ -58,6 +62,9 @@ type AzureCostsDataSource struct {
 	config AzureCostsPluginConfig
 
 	azureCosts *pkg.AzureCost
+
+	// cache at subscription level.
+	cache *Cache
 }
 
 // QueryData handles multiple queries and returns multiple responses.
@@ -101,6 +108,64 @@ type queryModel struct {
 	Format string `json:"format"`
 }
 
+// executes query AND populates cache.
+// return data that is in cache.
+// SubscriptionEntryCache is for a single subscription
+// and groups costs per resource group
+func (td *AzureCostsDataSource) executeQueryAndPopulateCache(subscriptionID string, startTime time.Time, endTime time.Time) (*SubscriptionCacheEntry, error) {
+
+	dailyBilling, err := td.azureCosts.GetAllBillingForSubscriptionID(subscriptionID, startTime, endTime)
+	if err != nil {
+		log.DefaultLogger.Error(fmt.Sprintf("ERROR getting costs %s", err.Error()))
+		return nil, err
+	}
+
+	log.DefaultLogger.Info(fmt.Sprintf("Got data, len %d", len(dailyBilling)))
+	cacheEntry := NewSubscriptionCacheEntry()
+	cacheEntry.SubscriptionID = subscriptionID
+  cacheEntry.StartDate = startTime
+	cacheEntry.EndDate = endTime
+
+  log.DefaultLogger.Info(fmt.Sprintf("first date result entry %s", dailyBilling[0].Properties.UsageStart))
+
+	//return nil, errors.New("FAKE ERROR")
+
+  for _, db := range dailyBilling {
+		ce := convertDailyBillingDetailsToDailyCacheEntry(db)
+
+		// resource group
+		sp := strings.Split(db.Properties.InstanceID, "/")
+		rg := strings.ToLower(sp[4]) // just deal with lowercase.
+
+		var dailyCacheEntryCollection map[time.Time]DailyCacheEntry
+		var ok bool
+		dailyCacheEntryCollection, ok = cacheEntry.ResourceGroupCosts[rg]
+		if !ok {
+			dailyCacheEntryCollection = make(map[time.Time]DailyCacheEntry)
+		}
+
+		// assuming multiple instances of same RG are returned (different resources within same RG)
+		// So just totalling up the amounts.
+		existingEntryForDate, ok := dailyCacheEntryCollection[ce.StartDate]
+		if ok {
+			ce.Amount += existingEntryForDate.Amount
+		}
+		/*
+    roundedStartTime2 := time.Date(startTime.Year(), startTime.Month(),
+      startTime.Day(), 0,0, 0, 0, time.UTC)
+    ce.StartDate = roundedStartTime2.UTC() */
+
+    log.DefaultLogger.Info(fmt.Sprintf("Adding cache with key  %s", ce.StartDate))
+		dailyCacheEntryCollection[ce.StartDate] = ce
+		cacheEntry.ResourceGroupCosts[rg] = dailyCacheEntryCollection
+	}
+
+	td.cache.Set(subscriptionID, *cacheEntry)
+
+	log.DefaultLogger.Info(fmt.Sprintf("returning cache entry, number of RG %d", len(cacheEntry.ResourceGroupCosts)))
+	return cacheEntry, nil
+}
+
 func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQuery) (*backend.DataResponse, error) {
 	// Unmarshal the json into our queryModel
 	var qm queryModel
@@ -110,12 +175,14 @@ func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQue
 	err := json.Unmarshal(queryBytes, &acQuery)
 	if err != nil {
 		// empty response? or real error? figure out later.
+		log.DefaultLogger.Error(fmt.Sprintf("Unable to get query %s", err.Error()))
 		return nil, err
 	}
 
 	response := backend.DataResponse{}
 	response.Error = json.Unmarshal(query.JSON, &qm)
 	if response.Error != nil {
+		log.DefaultLogger.Error(fmt.Sprintf("Unable to get qm resp %s", err.Error()))
 		return nil, err
 	}
 
@@ -124,21 +191,95 @@ func (td *AzureCostsDataSource) query(ctx context.Context, query backend.DataQue
 		log.DefaultLogger.Warn("format is empty. defaulting to time series")
 	}
 
-	sc, err := td.azureCosts.GenerateSubscriptionCostDetails([]string{td.config.SubscriptionID}, query.TimeRange.From, query.TimeRange.To)
-	if err != nil {
-		log.DefaultLogger.Error(fmt.Sprintf("ERROR getting costs %s", err.Error()))
-		return nil, err
+
+  roundedStartTime := time.Date(query.TimeRange.From.Year(), query.TimeRange.From.Month(),
+    query.TimeRange.From.Day(),0,0, 0, 0, time.UTC).UTC()
+
+  roundedEndTime := time.Date(query.TimeRange.To.Year(), query.TimeRange.To.Month(),
+    query.TimeRange.To.Day(),0,0, 0, 0, time.UTC).UTC()
+
+  /*
+	roundedStartTime := query.TimeRange.From
+	roundedEndTime := query.TimeRange.To */
+
+  log.DefaultLogger.Info(fmt.Sprintf("roundedStartTime 1 %s ", roundedStartTime))
+
+	subscriptionID := acQuery.QueryText
+
+	var cacheEntry *SubscriptionCacheEntry
+
+	// check if we already have this in cache.
+	cacheEntry = td.cache.Get(subscriptionID)
+
+	// if no cache entry or cache dates dont match, then do real query.
+	if cacheEntry == nil || !(cacheEntry.StartDate == roundedStartTime && cacheEntry.EndDate == roundedEndTime) {
+		log.DefaultLogger.Info("Populating cache")
+		cacheEntry, err = td.executeQueryAndPopulateCache(acQuery.QueryText, roundedStartTime, roundedEndTime)
+		if err != nil {
+			log.DefaultLogger.Error(fmt.Sprintf("query error %s", err.Error()))
+			return nil, err
+		}
+	} else {
+		log.DefaultLogger.Info("got data in cache")
 	}
 
-	log.DefaultLogger.Info(fmt.Sprintf("azure costs res %v", sc))
+  log.DefaultLogger.Info(fmt.Sprintf("roundedStartTime 2 %s ", roundedStartTime))
+	//log.DefaultLogger.Info(fmt.Sprintf("azure costs res %v", cacheEntry))
 
-	/*
+	// create data frame response
+	frame := data.NewFrame("response")
 
-	  // add the frames to the response
-	  response.Frames = append(response.Frames, frame)
-	  return &response, nil */
+	// only set time once? I hope :)
+	times := []time.Time{}
 
-	return nil, nil
+  currentTime := roundedStartTime
+
+	// Generate times array
+	for currentTime.Before(cacheEntry.EndDate) {
+		times = append(times, currentTime)
+		currentTime = currentTime.Add(24 * time.Hour)
+	}
+
+	log.DefaultLogger.Info(fmt.Sprintf("time count %d", len(times)))
+
+	for rg, costs := range cacheEntry.ResourceGroupCosts {
+    log.DefaultLogger.Info(fmt.Sprintf("roundedStartTime 3 %s ", roundedStartTime))
+		log.DefaultLogger.Info(fmt.Sprintf("rg %s : costs size %d", rg, len(costs)))
+		for _,c := range costs {
+      log.DefaultLogger.Info(fmt.Sprintf("rg %s : cost key %s", rg, c.StartDate))
+    }
+
+    //log.DefaultLogger.Info(fmt.Sprintf("rg %s : costs data %v", rg, costs))
+		amounts := []float64{}
+
+		// loop through time, so we can provide empty entries
+		// when we dont have data for that RG
+		currentTime = roundedStartTime
+		for currentTime.Before(cacheEntry.EndDate) {
+      log.DefaultLogger.Info(fmt.Sprintf("RG %s ct %s", rg, currentTime))
+			e, ok := costs[currentTime]
+			if ok {
+				amounts = append(amounts, e.Amount)
+			} else {
+				amounts = append(amounts, 0)
+			}
+			currentTime = currentTime.Add(24 * time.Hour)
+		}
+
+		log.DefaultLogger.Info(fmt.Sprintf("XXXXXXXXX RG %s val %v", rg, amounts))
+		frame.Fields = append(frame.Fields,
+			data.NewField(rg, nil, amounts),
+		)
+	}
+
+	frame.Fields = append(frame.Fields,
+		data.NewField("time", nil, times),
+	)
+
+	// add the frames to the response
+	response.Frames = append(response.Frames, frame)
+
+	return &response, nil
 }
 
 // CheckHealth handles health checks sent from Grafana to the plugin.
