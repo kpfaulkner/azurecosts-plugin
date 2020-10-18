@@ -48,7 +48,6 @@ func newAzureCostsDataSource() datasource.ServeOpts {
 
 	ds := &AzureCostsDataSource{
 		im: im,
-		//azureCosts: pkg.NewAzureCost("","","",""),
 		cache: NewCache(),
 	}
 
@@ -58,7 +57,7 @@ func newAzureCostsDataSource() datasource.ServeOpts {
 	}
 }
 
-// AzureCostsDataSource.... all things DD :)
+// AzureCostsDataSource....
 type AzureCostsDataSource struct {
 	// The instance manager can help with lifecycle management
 	// of datasource instances in plugins. It's not a requirements
@@ -72,6 +71,8 @@ type AzureCostsDataSource struct {
 	cache *Cache
 
 	// hopefully temporary lock to stop parallel queries to azure
+	// This will make all queries sequential for now, but given Azure Costs is only really refreshed once a day
+	// this isn't a big concern for me.
 	lock sync.Mutex
 }
 
@@ -103,9 +104,6 @@ func (td *AzureCostsDataSource) QueryData(ctx context.Context, req *backend.Quer
 		if err != nil {
 			return nil, err
 		}
-
-		// save the response in a hashmap
-		// based on with RefID as identifier
 		response.Responses[q.RefID] = *res
 	}
 
@@ -124,17 +122,13 @@ func (td *AzureCostsDataSource) executeQueryAndPopulateCache(subscriptionID stri
 		return nil, err
 	}
 
-	log.DefaultLogger.Info(fmt.Sprintf("Got data, len %d", len(dailyBilling)))
 	cacheEntry := NewSubscriptionCacheEntry()
 	cacheEntry.SubscriptionID = subscriptionID
 	cacheEntry.StartDate = startTime
 	cacheEntry.EndDate = endTime
 
-	log.DefaultLogger.Info(fmt.Sprintf("first date result entry %s", dailyBilling[0].Properties.UsageStart))
-
-	//return nil, errors.New("FAKE ERROR")
-
 	for _, db := range dailyBilling {
+	  // DailyCacheEntry is used for cache (subset of data of DailyBillingDetails)
 		ce := convertDailyBillingDetailsToDailyCacheEntry(db)
 
 		// resource group
@@ -155,17 +149,16 @@ func (td *AzureCostsDataSource) executeQueryAndPopulateCache(subscriptionID stri
 			ce.Amount += existingEntryForDate.Amount
 		}
 
-		log.DefaultLogger.Info(fmt.Sprintf("Adding cache with key  %s", ce.StartDate))
 		dailyCacheEntryCollection[ce.StartDate] = ce
 		cacheEntry.ResourceGroupCosts[rg] = dailyCacheEntryCollection
 	}
 
 	td.cache.Set(subscriptionID, *cacheEntry)
-
-	log.DefaultLogger.Info(fmt.Sprintf("returning cache entry, number of RG %d", len(cacheEntry.ResourceGroupCosts)))
 	return cacheEntry, nil
 }
 
+// generateRGSplitFrame returns a Grafana Frame which has multiple fields of data
+// one for each resource group (and the mandatory 'time' field)
 func (td *AzureCostsDataSource) generateRGSplitFrame(roundedStartTime time.Time, cacheEntry *SubscriptionCacheEntry) (*data.Frame, error) {
 
   // create data frame response
@@ -182,38 +175,29 @@ func (td *AzureCostsDataSource) generateRGSplitFrame(roundedStartTime time.Time,
     currentTime = currentTime.Add(24 * time.Hour)
   }
 
-  log.DefaultLogger.Info(fmt.Sprintf("time count %d", len(times)))
-
   for rg, costs := range cacheEntry.ResourceGroupCosts {
-    log.DefaultLogger.Info(fmt.Sprintf("roundedStartTime 3 %s ", roundedStartTime))
-    log.DefaultLogger.Info(fmt.Sprintf("rg %s : costs size %d", rg, len(costs)))
-    for _, c := range costs {
-      log.DefaultLogger.Info(fmt.Sprintf("rg %s : cost key %s", rg, c.StartDate))
-    }
-
-    //log.DefaultLogger.Info(fmt.Sprintf("rg %s : costs data %v", rg, costs))
     amounts := []float64{}
 
     // loop through time, so we can provide empty entries
     // when we dont have data for that RG
     currentTime = roundedStartTime
     for currentTime.Before(cacheEntry.EndDate) {
-      log.DefaultLogger.Info(fmt.Sprintf("RG %s ct %s", rg, currentTime))
       e, ok := costs[currentTime]
       if ok {
         amounts = append(amounts, e.Amount)
       } else {
         amounts = append(amounts, 0)
       }
-
       currentTime = currentTime.Add(24 * time.Hour)
     }
 
+    // store resourcegroup specific costs into Grafana frame.
     frame.Fields = append(frame.Fields,
       data.NewField(rg, nil, amounts),
     )
   }
 
+  // Also need times.
   frame.Fields = append(frame.Fields,
     data.NewField("time", nil, times),
   )
@@ -221,7 +205,8 @@ func (td *AzureCostsDataSource) generateRGSplitFrame(roundedStartTime time.Time,
   return frame, nil
 }
 
-func (td *AzureCostsDataSource) generateSubscriptionFrame(roundedStartTime time.Time, cacheEntry *SubscriptionCacheEntry) (*data.Frame, error) {
+// generateSubscriptionFrame generates a frame with just the totalled costs for the subscription per day
+func (td *AzureCostsDataSource) generateSubscriptionFrame(startTime time.Time, cacheEntry *SubscriptionCacheEntry) (*data.Frame, error) {
 
 
   timeCosts := make(map[time.Time]float64)
@@ -238,7 +223,7 @@ func (td *AzureCostsDataSource) generateSubscriptionFrame(roundedStartTime time.
   amounts := []float64{}
 
   // have all costs added up in timeCosts, now to map out to particular dates
-  currentTime := roundedStartTime
+  currentTime := startTime
 
   // Generate times array
   for currentTime.Before(cacheEntry.EndDate) {
@@ -285,22 +270,26 @@ func (td *AzureCostsDataSource) query(query backend.DataQuery) (*backend.DataRes
 		log.DefaultLogger.Warn("format is empty. defaulting to time series")
 	}
 
+	// want rounded times so query and cached results have the same timestamps
+	// otherwise we'll get cache misses.
 	roundedStartTime := time.Date(query.TimeRange.From.Year(), query.TimeRange.From.Month(),
 		query.TimeRange.From.Day(), 0, 0, 0, 0, time.UTC).UTC()
-
 	roundedEndTime := time.Date(query.TimeRange.To.Year(), query.TimeRange.To.Month(),
 		query.TimeRange.To.Day(), 0, 0, 0, 0, time.UTC).UTC()
 
 	subscriptionID := acQuery.QueryText
 	var cacheEntry *SubscriptionCacheEntry
 
+	// FUGLY lock... slows things down, but for now not really
+	// a concern. Can probably just put a subscription specific locks here.
 	td.lock.Lock()
-	// check if we already have this in cache.
+
 	cacheEntry = td.cache.Get(subscriptionID)
 
 	// if no cache entry or cache dates dont match, then do real query.
+	// Not a fancy cache (checking if we're querying for subset of whats in cache), but am fine with it
+	// for now.
 	if cacheEntry == nil || !(cacheEntry.StartDate == roundedStartTime && cacheEntry.EndDate == roundedEndTime) {
-		log.DefaultLogger.Info("Populating cache")
 		cacheEntry, err = td.executeQueryAndPopulateCache(acQuery.QueryText, roundedStartTime, roundedEndTime)
 		td.lock.Unlock()
 		if err != nil {
@@ -309,10 +298,10 @@ func (td *AzureCostsDataSource) query(query backend.DataQuery) (*backend.DataRes
 		}
 	} else {
     td.lock.Unlock()
-		log.DefaultLogger.Info("got data in cache")
 	}
 
 	// determine type of output (RG, total number, other etc).
+	// Doing string comparrison since I can't do UI's to save my life...  want a checkbox in the QueryEditor
   splitOnRG := acQuery.RGSplit=="Y"
 
   var frame *data.Frame
