@@ -2,7 +2,8 @@ package main
 
 import (
 	"github.com/kpfaulkner/azurecosts/pkg"
-	"time"
+  "sync"
+  "time"
 )
 
 type DailyCacheEntry struct {
@@ -29,11 +30,19 @@ func NewSubscriptionCacheEntry() *SubscriptionCacheEntry {
 
 type Cache struct {
 	cache map[string]SubscriptionCacheEntry
+
+	// mutex per subscription/start/end dates.
+	// hacky, but will do for now until I fix this up.
+	querySpecificLocks map[string]sync.Mutex
+
+	// global lock used to
+	lock sync.Mutex
 }
 
 func NewCache() *Cache {
 	c := Cache{}
 	c.cache = make(map[string]SubscriptionCacheEntry)
+	c.querySpecificLocks = make(map[string]sync.Mutex)
 	return &c
 }
 
@@ -45,6 +54,16 @@ func (c *Cache) Get(subID string) *SubscriptionCacheEntry {
 	return &entry
 }
 
+// gets cache entry and checks dates
+// only returns if dates are matching.
+func (c *Cache) GetAndCheckDates(subID string, startDate time.Time, endDate time.Time) *SubscriptionCacheEntry {
+  entry, ok := c.cache[subID]
+  if !ok {
+    return nil
+  }
+  return &entry
+}
+
 func (c *Cache) Set(subID string, entry SubscriptionCacheEntry) {
 	c.cache[subID] = entry
 }
@@ -53,13 +72,6 @@ func convertDailyBillingDetailsToDailyCacheEntry(dbd pkg.DailyBillingDetails) Da
 	dce := DailyCacheEntry{}
 	dce.ResourceGroup = dbd.Properties.SubscriptionGUID
 	dce.Amount = dbd.Properties.PretaxCost
-
-	/*
-		dce.StartDate = time.Date(dbd.Properties.UsageStart.Year(), dbd.Properties.UsageStart.Month(),
-	    dbd.Properties.UsageStart.Day(),0,0, 0, 0, dbd.Properties.UsageStart.Location()).UTC()
-		dce.EndDate = time.Date(dbd.Properties.UsageEnd.Year(), dbd.Properties.UsageEnd.Month(),
-	    dbd.Properties.UsageEnd.Day(),0,0, 0, 0, dbd.Properties.UsageEnd.Location()).UTC()
-	*/
 	dce.StartDate = dbd.Properties.UsageStart
 	dce.EndDate = dbd.Properties.UsageEnd
 

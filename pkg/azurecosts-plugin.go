@@ -12,7 +12,8 @@ import (
 	"github.com/kpfaulkner/azurecosts/pkg"
 	"net/http"
 	"strings"
-	"time"
+  "sync"
+  "time"
 )
 
 type AzureCostsQuery struct {
@@ -69,6 +70,9 @@ type AzureCostsDataSource struct {
 
 	// cache at subscription level.
 	cache *Cache
+
+	// hopefully temporary lock to stop parallel queries to azure
+	lock sync.Mutex
 }
 
 // QueryData handles multiple queries and returns multiple responses.
@@ -290,6 +294,7 @@ func (td *AzureCostsDataSource) query(query backend.DataQuery) (*backend.DataRes
 	subscriptionID := acQuery.QueryText
 	var cacheEntry *SubscriptionCacheEntry
 
+	td.lock.Lock()
 	// check if we already have this in cache.
 	cacheEntry = td.cache.Get(subscriptionID)
 
@@ -297,11 +302,13 @@ func (td *AzureCostsDataSource) query(query backend.DataQuery) (*backend.DataRes
 	if cacheEntry == nil || !(cacheEntry.StartDate == roundedStartTime && cacheEntry.EndDate == roundedEndTime) {
 		log.DefaultLogger.Info("Populating cache")
 		cacheEntry, err = td.executeQueryAndPopulateCache(acQuery.QueryText, roundedStartTime, roundedEndTime)
+		td.lock.Unlock()
 		if err != nil {
 			log.DefaultLogger.Error(fmt.Sprintf("query error %s", err.Error()))
 			return nil, err
 		}
 	} else {
+    td.lock.Unlock()
 		log.DefaultLogger.Info("got data in cache")
 	}
 
