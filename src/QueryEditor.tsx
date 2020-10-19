@@ -7,8 +7,7 @@ import {QueryEditorProps} from '@grafana/data';
 import { DataSource } from './DataSource';
 import {defaultQuery,  MyDataSourceOptions, MyQuery } from './types';
 
-
-const {  FormField } = LegacyForms;
+const {  FormField  } = LegacyForms;
 
 type Props = QueryEditorProps<DataSource, MyQuery, MyDataSourceOptions>;
 
@@ -19,11 +18,6 @@ export class QueryEditor extends PureComponent<Props> {
     onChange({ ...query, queryText: event.target.value });
   };
 
-  onRGTextChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const { onChange, query } = this.props;
-    onChange({ ...query, rgText: event.target.value });
-  };
-
   onConstantChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, constant: parseFloat(event.target.value) });
@@ -31,10 +25,21 @@ export class QueryEditor extends PureComponent<Props> {
     onRunQuery();
   };
 
+  onRGChange = (event: any) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, rgSplit: event.target.value });
+  };
+
+  onFieldValueChange = (event: any, _name?: string) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, rgSplit: event.target.value });
+  };
+  //private indvAnOutField: any;
+
   render() {
     const query = defaults(this.props.query, defaultQuery);
-    const { queryText } = query;
-    const { rgText } = query;
+    const { queryText, rgSplit} = query;
+    //const { rgText } = query;
     return (
       <div className="gf-form">
         <FormField
@@ -45,14 +50,13 @@ export class QueryEditor extends PureComponent<Props> {
           tooltip="Subscription ID"
           inputWidth={100}
         />
-        <FormField
-          labelWidth={8}
-          value={rgText || ''}
-          onChange={this.onRGTextChange}
-          label="Split on RG : Y/N"
-          tooltip="Split on Resource Groups"
-          inputWidth={100}
-        />
+        <select
+          value={rgSplit}
+          onChange={this.onRGChange}
+        >
+          <option value={'split'}>{'Split Resource Groups'}</option>
+          <option value={'totals'}>{'Subscription Totals'}</option>
+        </select>
 
       </div>
     );

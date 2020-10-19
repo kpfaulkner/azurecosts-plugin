@@ -16,6 +16,11 @@ import (
   "time"
 )
 
+const (
+  RGSplit string = "split"
+  //SubTotal string ="totals"
+)
+
 type AzureCostsQuery struct {
 	Constant      float64 `json:"constant"`
 	Datasource    string  `json:"datasource"`
@@ -24,7 +29,7 @@ type AzureCostsQuery struct {
 	MaxDataPoints int     `json:"maxDataPoints"`
 	OrgID         int     `json:"orgId"`
 	QueryText     string  `json:"queryText"`
-	RGSplit       string  `json:"rgText"`
+	RGSplit       string  `json:"rgSplit"`
 	RefID         string  `json:"refId"`
 }
 
@@ -300,9 +305,8 @@ func (td *AzureCostsDataSource) query(query backend.DataQuery) (*backend.DataRes
     td.lock.Unlock()
 	}
 
-	// determine type of output (RG, total number, other etc).
-	// Doing string comparrison since I can't do UI's to save my life...  want a checkbox in the QueryEditor
-  splitOnRG := acQuery.RGSplit=="Y"
+  // once we get more options will switch this properly.
+  splitOnRG := acQuery.RGSplit == RGSplit
 
   var frame *data.Frame
   if splitOnRG {
