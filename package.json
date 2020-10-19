@@ -1,6 +1,6 @@
 {
   "name": "kpfaulkner-azurecosts-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Datasource for Azure costs",
   "scripts": {
     "build": "grafana-toolkit plugin:build",
